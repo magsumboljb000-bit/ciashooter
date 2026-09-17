@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CIA SHOOTER — Open World Edition</title>
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#050708;font-family:Arial,sans-serif;color:#fff}
+canvas{display:block;width:100%;height:100%;background:#080b0c;cursor:crosshair}
+#hud{position:fixed;inset:0;pointer-events:none}
+.top{display:flex;justify-content:space-between;padding:18px 22px;font-weight:700;text-shadow:0 2px 4px #000;font-size:14px}.left{display:flex;gap:22px}.stat span{color:#ffb34a}
+#help{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);opacity:.7;font-size:12px;white-space:nowrap}
+#zone{position:absolute;top:55px;left:50%;transform:translateX(-50%);font-size:12px;letter-spacing:2px;text-transform:uppercase;opacity:.72;text-shadow:0 2px 5px #000}
+#gameover{display:none;position:absolute;inset:0;align-items:center;justify-content:center;flex-direction:column;background:#000b;z-index:500}.gamebox{padding:30px 42px;text-align:center;background:#0b0f12ee;border:1px solid #6b7478;border-radius:10px}.gamebox h1{font-size:44px;margin:0 0 8px}.btn{pointer-events:auto;border:1px solid #ff8d32;background:#24160c;color:#fff;padding:12px 22px;border-radius:7px;cursor:pointer;font-weight:700}
+#disclaimer{position:fixed;inset:0;z-index:1000;display:flex;align-items:flex-end;justify-content:center;padding-bottom:9vh;background:#0008;pointer-events:auto}.discbox{width:min(620px,82vw);background:#0b0e10f5;border:1px solid #596064;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px #000;display:flex;align-items:center;gap:18px}.discbox b{color:#ffb34a}.discbox p{margin:0;line-height:1.4;font-size:14px;flex:1}.ok{border:1px solid #ff9a3d;background:#2a190c;color:white;border-radius:6px;padding:9px 18px;cursor:pointer;font-weight:700}
+#toast{position:absolute;left:50%;top:82px;transform:translateX(-50%);padding:7px 14px;border:1px solid #697275;background:#080c0ddd;border-radius:20px;font-size:12px;opacity:0;transition:opacity .2s;letter-spacing:1px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="top"><div class="left"><div class="stat">WAVE <span id="wave">1</span></div><div class="stat">KILLS <span id="kills">0</span></div><div class="stat">HP <span id="hp">100</span></div></div><div class="stat">WALKERS <span id="zombies">0</span></div></div>
+  <div id="zone">SECTOR 0 / 0</div>
+  <div id="toast"></div>
+  <div id="help">WASD / ARROWS to move • Mouse to aim • Left Click to fire • Hold SHIFT to sprint</div>
+  <div id="gameover"><div class="gamebox"><h1>YOU GOT CAUGHT</h1><div id="final" style="opacity:.75;margin-bottom:18px"></div><button class="btn" onclick="location.reload()">RETRY</button></div></div>
+</div>
+<div id="disclaimer"><div class="discbox"><p><b>DISCLAIMER:</b> Larong ito ay ginawa dahil nabobored na ako mag-alaga kay Cia. 😂</p><button class="ok" id="okBtn">OK</button></div></div>
+<script>
+const canvas=document.getElementById('game'),ctx=canvas.getContext('2d');
+let VW=innerWidth,VH=innerHeight,dpr=Math.min(devicePixelRatio||1,2);
+function resize(){VW=innerWidth;VH=innerHeight;dpr=Math.min(devicePixelRatio||1,2);canvas.width=VW*dpr;canvas.height=VH*dpr;ctx.setTransform(dpr,0,0,dpr,0,0)}
+addEventListener('resize',resize);resize();
+
+const keys={},mouse={x:VW/2,y:VH/2,down:false};
+addEventListener('keydown',e=>{keys[e.key.toLowerCase()]=true;if(['arrowup','arrowdown','arrowleft','arrowright',' '].includes(e.key.toLowerCase()))e.preventDefault()});
+addEventListener('keyup',e=>keys[e.key.toLowerCase()]=false);
+addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+addEventListener('mousedown',e=>{if(e.button===0)mouse.down=true});addEventListener('mouseup',e=>{if(e.button===0)mouse.down=false});
+
+// The world is much larger than the screen. The camera follows the player, so the floor,
+// roads, buildings and landmarks continuously slide through the viewport as the player walks.
+const TILE=64,CHUNK=640,WORLD=24000;
+const player={x:WORLD/2,y:WORLD/2,r:15,hp:100,speed:205,cool:0,angle:0};
+let camX=player.x,camY=player.y,wave=1,kills=0,gameOver=false,started=false;
+let zombies=[],bullets=[],particles=[],spawnTimer=0,spawnLeft=0,nextWave=0,last=0;
+const chunkCache=new Map();
+
+function hash2(a,b){let n=(a*374761393+b*668265263)|0;n=(n^(n>>>13))*1274126177;n=n^(n>>>16);return (n>>>0)/4294967296}
+function rand(a,b){return hash2(a,b)}
+function sector(cx,cy){return Math.floor(cx/10)+','+Math.floor(cy/10)}
+function chunkData(cx,cy){
+  const key=cx+','+cy;if(chunkCache.has(key))return chunkCache.get(key);
+  const ox=cx*CHUNK,oy=cy*CHUNK, items=[];
+  // Road strips create a city-like continuous world. Every chunk gets a few structures.
+  const roadX=(Math.abs(cx)%4===0),roadY=(Math.abs(cy)%4===0);
+  const base=roadX||roadY?'road':((cx+cy)%7===0?'park':'concrete');
+  if(!roadX&&!roadY){
+    const count=3+Math.floor(rand(cx+31,cy+91)*4);
+    for(let i=0;i<count;i++){
+      const w=90+rand(cx*11+i,cy*17+i+5)*145,h=80+rand(cx*19+i+2,cy*7+i+3)*130;
+      const x=ox+45+rand(cx*23+i,cy*29+i)*Math.max(1,CHUNK-w-90);
+      const y=oy+45+rand(cx*31+i,cy*13+i)*Math.max(1,CHUNK-h-90);
+      items.push({type:'building',x,y,w,h,door:Math.floor(rand(cx*41+i,cy*43+i)*4)})
+    }
+  }
+  if(base==='park'){
+    for(let i=0;i<8;i++)items.push({type:'tree',x:ox+40+rand(cx*51+i,cy*61+i)*560,y:oy+40+rand(cx*71+i,cy*73+i)*560,r:12+rand(cx*79+i,cy*83+i)*9})
+  }
+  const d={base,items};chunkCache.set(key,d);return d;
+}
+function visibleChunks(range=2){const cx=Math.floor(player.x/CHUNK),cy=Math.floor(player.y/CHUNK),out=[];for(let y=cy-range;y<=cy+range;y++)for(let x=cx-range;x<=cx+range;x++)out.push([x,y,chunkData(x,y)]);return out}
+function wallsNear(px,py,range=2){const out=[];for(const [cx,cy,d] of visibleChunks(range))for(const it of d.items)if(it.type==='building')out.push(it);return out}
+function circleRectHit(cx,cy,r,w){const nx=Math.max(w.x,Math.min(cx,w.x+w.w)),ny=Math.max(w.y,Math.min(cy,w.y+w.h));return Math.hypot(cx-nx,cy-ny)<r}
+function moveCircle(o,dx,dy,r){const oldx=o.x,oldy=o.y;o.x+=dx;for(const w of wallsNear(o.x,o.y,2))if(circleRectHit(o.x,o.y,r,w)){o.x=oldx;break}o.y+=dy;for(const w of wallsNear(o.x,o.y,2))if(circleRectHit(o.x,o.y,r,w)){o.y=oldy;break}o.x=Math.max(r,Math.min(WORLD-r,o.x));o.y=Math.max(r,Math.min(WORLD-r,o.y))}
+function blocked(x,y,r=12){return wallsNear(x,y,2).some(w=>circleRectHit(x,y,r,w))}
+
+function startGame(){started=true;document.getElementById('disclaimer').style.display='none';spawnLeft=8;spawnTimer=.25;showToast('SECTOR 0 / 0')}
+document.getElementById('okBtn').onclick=startGame;
+
+function randomOpenAround(min=500,max=1000){for(let i=0;i<120;i++){const a=Math.random()*Math.PI*2,d=min+Math.random()*(max-min),x=player.x+Math.cos(a)*d,y=player.y+Math.sin(a)*d;if(x>50&&y>50&&x<WORLD-50&&y<WORLD-50&&!blocked(x,y,16))return{x,y}}return{x:player.x+700,y:player.y}}
+function spawnZombie(){const p=randomOpenAround(520,1050);const elite=Math.random()<Math.min(.08+wave*.012,.24);zombies.push({x:p.x,y:p.y,r:elite?18:14,hp:elite?3:1,max:elite?3:1,speed:elite?52+wave*2:58+wave*2,elite,wander:Math.random()*6.28,turn:0})}
+function shoot(){if(!started||gameOver||player.cool>0)return;player.cool=.105;const a=player.angle;bullets.push({x:player.x+Math.cos(a)*25,y:player.y+Math.sin(a)*25,vx:Math.cos(a)*920,vy:Math.sin(a)*920,life:.8})}
+function burst(px,py,n=8){for(let i=0;i<n;i++){const a=Math.random()*6.28,s=30+Math.random()*190;particles.push({x:px,y:py,vx:Math.cos(a)*s,vy:Math.sin(a)*s,life:.35})}}
+
+function update(dt){
+ if(!started||gameOver)return;
+ const mx=(keys.d||keys.arrowright?1:0)-(keys.a||keys.arrowleft?1:0),my=(keys.s||keys.arrowdown?1:0)-(keys.w||keys.arrowup?1:0),len=Math.hypot(mx,my)||1;
+ const sprint=keys.shift?1.45:1;moveCircle(player,mx/len*player.speed*sprint*dt,my/len*player.speed*sprint*dt,player.r);
+ const wx=mouse.x-VW/2,wy=mouse.y-VH/2;player.angle=Math.atan2(wy,wx);player.cool-=dt;if(mouse.down)shoot();
+ camX+=(player.x-camX)*Math.min(1,dt*8);camY+=(player.y-camY)*Math.min(1,dt*8);
+ if(spawnLeft>0){spawnTimer-=dt;if(spawnTimer<=0){spawnZombie();spawnLeft--;spawnTimer=Math.max(.18,.55-wave*.018)}}else if(zombies.length===0){nextWave+=dt;if(nextWave>1.7){wave++;spawnLeft=8+wave*4;nextWave=0}}
+ for(const b of bullets){b.x+=b.vx*dt;b.y+=b.vy*dt;b.life-=dt;if(blocked(b.x,b.y,2))b.life=0}
+ bullets=bullets.filter(b=>b.life>0&&b.x>0&&b.y>0&&b.x<WORLD&&b.y<WORLD);
+ for(const z of zombies){const dx=player.x-z.x,dy=player.y-z.y,dist=Math.hypot(dx,dy);let a=Math.atan2(dy,dx);z.turn-=dt;if(z.turn<=0){z.turn=.35+Math.random()*.8;z.wander=(Math.random()-.5)*.65}a+=z.wander;moveCircle(z,Math.cos(a)*z.speed*dt,Math.sin(a)*z.speed*dt,z.r);if(dist<z.r+15){player.hp-=24*dt;burst(player.x,player.y,1)}}
+ for(const b of bullets){for(const z of zombies){if(z.hp>0&&Math.hypot(b.x-z.x,b.y-z.y)<z.r+6){z.hp--;b.life=0;burst(z.x,z.y,6);if(z.hp<=0)kills++}}}
+ zombies=zombies.filter(z=>z.hp>0);for(const p of particles){p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.94;p.vy*=.94;p.life-=dt}particles=particles.filter(p=>p.life>0);
+ if(player.hp<=0){player.hp=0;gameOver=true;document.getElementById('gameover').style.display='flex';document.getElementById('final').textContent=`Wave ${wave} • ${kills} kills`}
+ document.getElementById('wave').textContent=wave;document.getElementById('kills').textContent=kills;document.getElementById('hp').textContent=Math.floor(player.hp);document.getElementById('zombies').textContent=zombies.length+spawnLeft;
+ const sx=Math.floor(player.x/CHUNK),sy=Math.floor(player.y/CHUNK);document.getElementById('zone').textContent='SECTOR '+sx+' / '+sy;
+}
+
+function worldToScreen(x,y){return{x:x-camX+VW/2,y:y-camY+VH/2}}
+function drawWorld(){
+ ctx.fillStyle='#0b0f10';ctx.fillRect(0,0,VW,VH);
+ const chunks=visibleChunks(2);
+ for(const [cx,cy,d] of chunks){const ox=cx*CHUNK-camX+VW/2,oy=cy*CHUNK-camY+VH/2;
+   ctx.fillStyle=d.base==='road'?'#171a1a':d.base==='park'?'#101712':'#111516';ctx.fillRect(ox,oy,CHUNK,CHUNK);
+   // continuous grid / pavement seams
+   ctx.strokeStyle=d.base==='road'?'#292d2d':'#1e2423';ctx.lineWidth=1;
+   for(let gx=0;gx<=CHUNK;gx+=TILE){ctx.beginPath();ctx.moveTo(ox+gx,oy);ctx.lineTo(ox+gx,oy+CHUNK);ctx.stroke()}
+   for(let gy=0;gy<=CHUNK;gy+=TILE){ctx.beginPath();ctx.moveTo(ox,oy+gy);ctx.lineTo(ox+CHUNK,oy+gy);ctx.stroke()}
+   if(d.base==='road'){
+     ctx.strokeStyle='#77725d55';ctx.setLineDash([18,22]);ctx.lineWidth=2;
+     if(Math.abs(cx)%4===0){ctx.beginPath();ctx.moveTo(ox+CHUNK/2,oy);ctx.lineTo(ox+CHUNK/2,oy+CHUNK);ctx.stroke()}
+     if(Math.abs(cy)%4===0){ctx.beginPath();ctx.moveTo(ox,oy+CHUNK/2);ctx.lineTo(ox+CHUNK,oy+CHUNK/2);ctx.stroke()}
+     ctx.setLineDash([])
+   }
+   for(const it of d.items){if(it.type==='building'){const p=worldToScreen(it.x,it.y);ctx.fillStyle='#0008';ctx.fillRect(p.x+7,p.y+9,it.w,it.h);ctx.fillStyle='#3f4749';ctx.fillRect(p.x,p.y,it.w,it.h);ctx.fillStyle='#5d6668';ctx.fillRect(p.x,p.y,it.w,6);ctx.strokeStyle='#252a2b';ctx.strokeRect(p.x,p.y,it.w,it.h);ctx.fillStyle='#202526';ctx.fillRect(p.x+10,p.y+14,Math.max(20,it.w-20),5); // roof detail
+       const doorX=p.x+10+(it.door%4)*(Math.max(20,it.w-45)/4);ctx.fillStyle='#191c1d';ctx.fillRect(doorX,p.y+it.h-30,22,30);
+     } else if(it.type==='tree'){const p=worldToScreen(it.x,it.y);ctx.fillStyle='#0007';ctx.beginPath();ctx.ellipse(p.x+5,p.y+8,it.r*1.2,it.r*.55,0,0,6.28);ctx.fill();ctx.fillStyle='#263b2a';ctx.beginPath();ctx.arc(p.x,p.y,it.r,0,6.28);ctx.fill();ctx.fillStyle='#344b35';ctx.beginPath();ctx.arc(p.x-5,p.y-5,it.r*.65,0,6.28);ctx.fill();ctx.fillStyle='#584438';ctx.fillRect(p.x-3,p.y+7,6,12)}
+   }
+ }
+}
+function drawFlashlight(){
+ const a=player.angle,reach=470,spread=.46;ctx.save();ctx.globalCompositeOperation='lighter';const px=VW/2,py=VH/2;const gx=px+Math.cos(a)*170,gy=py+Math.sin(a)*170;const g=ctx.createRadialGradient(gx,gy,10,gx,gy,340);g.addColorStop(0,'#fff5c755');g.addColorStop(.4,'#fff1bd22');g.addColorStop(1,'transparent');ctx.fillStyle=g;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(px+Math.cos(a-spread)*reach,py+Math.sin(a-spread)*reach);ctx.arc(px,py,reach,a-spread,a+spread);ctx.lineTo(px,py);ctx.fill();ctx.restore();
+ const v=ctx.createRadialGradient(px,py,100,px,py,Math.max(VW,VH)*.72);v.addColorStop(0,'transparent');v.addColorStop(.28,'#0002');v.addColorStop(.58,'#0008');v.addColorStop(1,'#000f');ctx.fillStyle=v;ctx.fillRect(0,0,VW,VH)
+}
+function drawEntities(){
+ for(const p of particles){const s=worldToScreen(p.x,p.y);ctx.globalAlpha=Math.max(0,p.life/.35);ctx.fillStyle='#ffb347';ctx.beginPath();ctx.arc(s.x,s.y,2.5,0,6.28);ctx.fill()}ctx.globalAlpha=1;
+ for(const b of bullets){const s=worldToScreen(b.x,b.y);ctx.strokeStyle='#ffd27a';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(s.x,s.y);ctx.lineTo(s.x-b.vx*.025,s.y-b.vy*.025);ctx.stroke()}
+ for(const z of zombies){const s=worldToScreen(z.x,z.y);const a=Math.atan2(player.y-z.y,player.x-z.x),walk=Math.sin(performance.now()/110+z.x*.03)*3;ctx.save();ctx.translate(s.x,s.y);ctx.rotate(a);
+   ctx.fillStyle='#0009';ctx.beginPath();ctx.ellipse(0,17,z.r*1.35,z.r*.5,0,0,6.28);ctx.fill();ctx.strokeStyle='#25282d';ctx.lineWidth=5;ctx.lineCap='round';ctx.beginPath();ctx.moveTo(-5,7);ctx.lineTo(-8+walk,18);ctx.moveTo(5,7);ctx.lineTo(8-walk,18);ctx.stroke();ctx.fillStyle=z.elite?'#4b2228':'#334047';ctx.beginPath();ctx.roundRect(-10,-4,20,17,5);ctx.fill();ctx.fillStyle='#8d2228';ctx.fillRect(-5,2,10,4);ctx.strokeStyle='#b77f72';ctx.lineWidth=5;ctx.beginPath();ctx.moveTo(-8,-1);ctx.lineTo(-15,5+walk);ctx.moveTo(8,-1);ctx.lineTo(15,5-walk);ctx.stroke();ctx.fillStyle='#b98578';ctx.beginPath();ctx.arc(0,-12,9,0,6.28);ctx.fill();ctx.fillStyle='#252326';ctx.beginPath();ctx.arc(0,-17,9,3.1,6.3);ctx.fill();ctx.fillStyle='#e33';ctx.beginPath();ctx.arc(-3,-12,1.5,0,6.28);ctx.arc(3,-12,1.5,0,6.28);ctx.fill();if(z.elite){ctx.fillStyle='#ffb347';ctx.fillRect(-z.r,-z.r-9,z.r*2,3);ctx.fillStyle='#e33';ctx.fillRect(-z.r,-z.r-9,z.r*2*(z.hp/z.max),3)}ctx.restore()}
+ // hero
+ const px=VW/2,py=VH/2;ctx.save();ctx.translate(px,py);ctx.rotate(player.angle);ctx.fillStyle='#000b';ctx.beginPath();ctx.ellipse(0,19,25,10,0,0,6.28);ctx.fill();ctx.strokeStyle='#c98982';ctx.lineWidth=3;ctx.beginPath();ctx.arc(-16,9,18,.2,2.9);ctx.stroke();ctx.fillStyle='#24262b';ctx.beginPath();ctx.ellipse(-7,17,8,5,0,0,6.28);ctx.ellipse(8,17,8,5,0,0,6.28);ctx.fill();ctx.fillStyle='#20242a';ctx.beginPath();ctx.roundRect(-13,-3,26,23,8);ctx.fill();ctx.fillStyle='#9b2226';ctx.fillRect(-10,3,20,5);ctx.fillStyle='#d6a29d';ctx.beginPath();ctx.arc(-10,-14,10,0,6.28);ctx.arc(10,-14,10,0,6.28);ctx.fill();ctx.fillStyle='#f2b9b4';ctx.beginPath();ctx.arc(-10,-14,6,0,6.28);ctx.arc(10,-14,6,0,6.28);ctx.fill();ctx.fillStyle='#e7c2b9';ctx.beginPath();ctx.arc(0,-12,14,0,6.28);ctx.fill();ctx.fillStyle='#6d4540';ctx.beginPath();ctx.arc(0,-17,13,3.2,6.2);ctx.fill();ctx.beginPath();ctx.arc(-11,-14,5,2.4,5.6);ctx.fill();ctx.fillStyle='#17151a';ctx.beginPath();ctx.arc(-5,-12,3.3,0,6.28);ctx.arc(5,-12,3.3,0,6.28);ctx.fill();ctx.fillStyle='#fff';ctx.beginPath();ctx.arc(-4,-13,1,0,6.28);ctx.arc(6,-13,1,0,6.28);ctx.fill();ctx.fillStyle='#d57c83';ctx.beginPath();ctx.arc(0,-7,2,0,6.28);ctx.fill();ctx.fillStyle='#e31d2b';ctx.beginPath();ctx.arc(-13,-22,5,0,6.28);ctx.arc(-6,-22,5,0,6.28);ctx.fill();ctx.fillStyle='#b91522';ctx.beginPath();ctx.arc(-9.5,-22,2.5,0,6.28);ctx.fill();ctx.strokeStyle='#e7c2b9';ctx.lineWidth=6;ctx.beginPath();ctx.moveTo(5,1);ctx.lineTo(14,0);ctx.moveTo(2,6);ctx.lineTo(13,5);ctx.stroke();ctx.fillStyle='#202329';ctx.fillRect(7,-3,27,6);ctx.fillStyle='#11151a';ctx.fillRect(29,-1,12,3);ctx.fillStyle='#ffbd4a';ctx.fillRect(40,-1,5,2);ctx.restore();
+}
+function drawMinimap(){
+ const mw=170,mh=126,x0=VW-mw-18,y0=60;ctx.save();ctx.fillStyle='#05080cee';ctx.fillRect(x0,y0,mw,mh);ctx.strokeStyle='#d7d9d9';ctx.strokeRect(x0,y0,mw,mh);ctx.fillStyle='#9aa0a0';ctx.font='700 9px Arial';ctx.fillText('TACTICAL MAP',x0+10,y0+14);const scale=.12,cx=player.x,cy=player.y;
+ for(const [qx,qy,d] of visibleChunks(2))for(const it of d.items)if(it.type==='building'){const sx=x0+mw/2+(it.x-cx)*scale,sy=y0+mh/2+(it.y-cy)*scale;ctx.fillStyle='#555e61';ctx.fillRect(sx,sy,it.w*scale,it.h*scale)}
+ for(const z of zombies){const sx=x0+mw/2+(z.x-cx)*scale,sy=y0+mh/2+(z.y-cy)*scale;ctx.fillStyle=z.elite?'#ff9f2f':'#e63b45';ctx.beginPath();ctx.arc(sx,sy,z.elite?3:2,0,6.28);ctx.fill()}
+ ctx.fillStyle='#55aaff';ctx.beginPath();ctx.arc(x0+mw/2,y0+mh/2,4,0,6.28);ctx.fill();ctx.strokeStyle='#8ed0ff';ctx.beginPath();ctx.moveTo(x0+mw/2,y0+mh/2);ctx.lineTo(x0+mw/2+Math.cos(player.angle)*18,y0+mh/2+Math.sin(player.angle)*18);ctx.stroke();ctx.restore()
+}
+function draw(){drawWorld();drawEntities();drawFlashlight();drawMinimap()}
+function showToast(t){const el=document.getElementById('toast');el.textContent=t;el.style.opacity=1;clearTimeout(showToast.t);showToast.t=setTimeout(()=>el.style.opacity=0,1200)}
+function loop(t){const dt=Math.min(.033,(t-last)/1000||0);last=t;update(dt);draw();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
